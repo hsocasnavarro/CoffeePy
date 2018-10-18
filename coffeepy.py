@@ -59,8 +59,9 @@
 # 2) Should be as fast as possible
 #
 #
+#    Initial version by Hector Socas-Navarro
+#    Icon design by Íñigo "Deimos" Faure
 #
-
 import numpy as np
 import soundfile as sf
 #import matplotlib.pyplot as plt
