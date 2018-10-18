@@ -8,6 +8,11 @@
 #
 # Dependencies (modules available with pip): numpy, soundfile
 # External programs required (must be in path): sox, lame
+#    Note: lame is needed due to a bug in the PySoundfile library
+#    (or its dependences) that makes it crash when writing large
+#    compressed files. As a workaround, we use lame for encoding
+#    sox is needed to speed up the noise filtering. This step would
+#    be too slow if done in Python
 #
 #
 # The code must fulfill the following tasks:
@@ -53,7 +58,7 @@
 # Requirements
 #
 # 1) Should be able to work with large files. Input wave files can be
-#    up to 4 hours in length with 41000Hz sample rate. Must work on
+#    up to 4 hours in length with 41000Hz sample rate. Must work 
 #    with 8Gb RAM
 #
 # 2) Should be as fast as possible
@@ -64,8 +69,6 @@
 #
 import numpy as np
 import soundfile as sf
-#import matplotlib.pyplot as plt
-#from scipy.signal import savgol_filter
 import sys
 import os.path, shutil
 import tkinter as tk
