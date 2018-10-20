@@ -8,17 +8,14 @@
 #
 # Dependencies (modules available with pip): numpy, soundfile
 # External programs required (must be in path): sox, lame
-#    Note: lame is needed due to a bug in the PySoundfile library
-#    (or its dependences) that makes it crash when writing large
-#    compressed files. As a workaround, we use lame for encoding
-#    sox is needed to speed up the noise filtering. This step would
-#    be too slow if done in Python
 #
 #
 # The code must fulfill the following tasks:
 #
 # 1) Take one or more input audio files, each file has an audio track
-#    with the recording of each microphone
+#    with the recording of each microphone. Input files may be passed
+#    as arguments (non-interactive mode), otherwise a GUI pops up to
+#    interactively select one or more files
 #
 # 2) Optionally, generate a compressed copy of the input files for archival
 #    (if "Compress original files" is specified in ~/coffeepy.ini)
@@ -48,6 +45,11 @@
 #
 # 6) Apply noise reduction to the mixed track using the sox algorithm
 #
+# 7) Optional: If ffmpeg is available in the system, use its loudnorm
+#    filter to perform normalization according to EBU-R128 standard. Set
+#    integral loudness to recommended value of -16 (for references see links
+#    in comments below). If ffmpeg is not available, skip this step
+#
 # 7) Write resulting track as wav (optional, if "Output wav dir" is
 #    specified in ~/coffeepy.ini) and/or mp3 (optional, if "Output mp3 dir"
 #    is specified)
@@ -55,25 +57,28 @@
 # 8) Update configuration file ~/coffeepy.ini with current values to remember
 #    them next time
 #
+#
 # Requirements
 #
 # 1) Should be able to work with large files. Input wave files can be
-#    up to 4 hours in length with 41000Hz sample rate. Must work 
+#    up to 4 hours in length with 41000Hz sample rate. Must work on
 #    with 8Gb RAM
 #
 # 2) Should be as fast as possible
 #
 #
-#    Initial version by Hector Socas-Navarro
-#    Icon design by Íñigo "Deimos" Faure
 #
+
 import numpy as np
 import soundfile as sf
+#import matplotlib.pyplot as plt
+#from scipy.signal import savgol_filter
 import sys
 import os.path, shutil
 import tkinter as tk
 import tkinter.filedialog
 import io
+import time
 from subprocess import Popen, PIPE
 
 # Routine to find peaks. Optimized for speed (not readability)
@@ -125,10 +130,15 @@ if len(configfile) > 0:
     except:
         print('Error in config file. Attempting to read file:'+os.path.join(homedir,'coffeepy.ini'))        
 
+
+# Filenames from arguments or pick them up via GUI?
+if len(sys.argv) > 1:
+    filenames=sys.argv[1:]
+else:        
 # GUI
-root = tk.Tk()
-root.withdraw()
-filenames = tkinter.filedialog.askopenfilenames(initialdir=startdir,filetypes=[('Audio files','.wav .WAV .ogg .OGG .mp3 .MP3'),('All files','*')])
+    root = tk.Tk()
+    root.withdraw()
+    filenames = tkinter.filedialog.askopenfilenames(initialdir=startdir,filetypes=[('Audio files','.wav .WAV .ogg .OGG'),('All files','*')])
 
 if len(filenames) == 0:
     print('Exiting')
@@ -144,6 +154,10 @@ for filename in filenames:
     # Save a compressed copy'
     if compressoriginals == 'y':
         extension=os.path.splitext(filename)[1].lower()
+        if extension == '.mp3':
+            print('Sorry, mp3 input is not supported at the time')
+            time.sleep(1000)
+            sys.exit(1)
         if extension == '.mp3' or extension == '.ogg': # just copy it
             filenamesplit=os.path.basename(filename)
             outfilename=os.path.join(outmp3dir,filenamesplit)
@@ -152,9 +166,10 @@ for filename in filenames:
                 print('Copying '+outfilename)
                 shutil.copyfile(filename,outfilename)
         else: # Compress
-            outfile=os.path.splitext(filename)[0]+'.mp3'
+            outfile=os.path.basename(filename)
+            outfile=os.path.splitext(outfile)[0]+'.mp3'
+            outfile=os.path.join(outmp3dir,outfile)
             print('Compressing '+outfile)
-            outfile=os.path.join(outmp3path,outfile)
 # First use of virtual file (others below). Create BytesIO buffer
             wavbuffer=io.BytesIO()
             sf.write(wavbuffer,data,samplerate,format='wav')
@@ -173,8 +188,12 @@ for filename in filenames:
     else:
         if samplerate != samplerate0:
             print('Filename has a different samplerate ({} instead of {})'.format(samplerate,samplerate0))
+            time.sleep(1000)
+            sys.exit(1)
         if length != length0:
             print('Filename has a different duration ({} samples instead of {})'.format(length,length0))
+            time.sleep(1000)
+            sys.exit(1)
 
     # Take 1-second bins to find peaks, determine if voice or silence
     pk=peaks(data,samplerate) # peaks in 1-second bins
@@ -190,6 +209,7 @@ for filename in filenames:
     lengthprof=int(samplerate/10)
     if lengthprof < 100:
         print('Error, too few samples')
+        time.sleep(1000)
         sys.exit(1)
     proflower=0.5*(1+np.cos(np.arange(lengthprof)/lengthprof*np.pi))
     profraise=0.5*(1-np.cos(np.arange(lengthprof)/lengthprof*np.pi))
@@ -227,16 +247,27 @@ for filename in filenames:
     # Apply gain
     data=np.multiply(data,gain)
 
+    # Silence bins with no signal or pops (pops are noises shorter than 0.1sec)
+    print('muting silence and removing pops')
+    absdata=np.abs(data)
+    imin=np.argmin(pk) # bin with minimum signal. Assume this is noise
+    noiselev=np.std(absdata[imin*samplerate:(imin+1)*samplerate])
+    for i0 in range(length2):
+        bin=absdata[i0*samplerate:(i0+1)*samplerate]
+        if np.sum(bin > 5*noiselev)/samplerate < 0.1: # if no signal longer
+            data[i0*samplerate:(i0+1)*samplerate]=0.
+    
     print('renormalizing track')
     # Normalize with distortion above 5-sigma
     absdata=np.abs(data)
     absdata=absdata[absdata > 0.1] # consider frames with signal only
     norm=np.mean(absdata)+np.std(absdata)*5
     data=data/norm*.8
-    # Trick for teleconference track (always sounds louder)
-    if '_L.' in filename:
-        print('Trick for reducing volume in telecon track')
-        data=data*.8
+    # For Coffee Break only
+    # Trick for teleconference track (always sounds louder, for some reason)
+    #if '_L.' in filename:
+    #    print('Trick for reducing volume in telecon track')
+    #    data=data*.8
     #
     # Look for saturations in mixed track
     data=np.where(data > .85, .85+(data-.85)/3,data)
@@ -256,30 +287,74 @@ if len(filenames) >= 2:
 # de-noise
 # according to https://stackoverflow.com/questions/44159621/how-to-denoise-with-sox
 print('Noise reduction')
+pk=peaks(data,samplerate) # peaks in 1-second bins
+imin=np.argmin(pk) # Find minimum
+iminhours=int(imin/samplerate/3600)
+iminmin=int((imin/samplerate-iminhours*3600)/60)
+iminsec=int((imin/samplerate-iminhours*3600-iminmin*60))
+print('  taking noise from silence at {}hours, {}mins, {}seconds'.format(iminhours,iminmin,iminsec))
+noise=dataout[imin*samplerate:(imin+1)*samplerate]
 
 wavbuffer=io.BytesIO()
-sf.write(wavbuffer,dataout,samplerate,format='wav')
+sf.write(wavbuffer,noise,samplerate,format='wav')
 
 # Use sox to denoise. We pipe BytesIO buffer through sox
 # First, create noise profile noise.prof. Create sox pipe
 pipe = Popen(['sox','-','-n','noiseprof',os.path.join(tmpdir,'noise.prof')], **kwargs)
-noisebuffer=wavbuffer.getvalue()[0:samplerate*2] # 2-seconds
-if np.sum(voice[0:2]) != 0:
-    print("\nError! De-noise requires 2-seconds of silence at beginning of track")
-    print("Apparently that's not the case here")
-    print("Skipping noise reduction\n")
-    errors.append('Could not apply noise reduction')
-    wavbuffer.close()
-else:
-    pipe.communicate(input=noisebuffer) # Send noise data to sox
-    # Now filter the rest using noise.prof. Create sox pipe
-    pipe = Popen(['sox','-','-t','wav','-','noisered',os.path.join(tmpdir,'noise.prof'),'0.21'], **kwargs)
+noisebuffer=wavbuffer.getvalue()
+pipe.communicate(input=noisebuffer) # Send noise data to sox
+# Now filter the rest using noise.prof. Create sox pipe
+pipe = Popen(['sox','-','-t','wav','-','noisered',os.path.join(tmpdir,'noise.prof'),'0.21'], **kwargs)
+wavbuffer.close()
+wavbuffer=io.BytesIO(output)
+sf.write(wavbuffer,dataout,samplerate,format='wav')
+(output,err)=pipe.communicate(input=wavbuffer.getvalue())
+wavbuffer.close()
+wavbuffer=io.BytesIO(output)
+dataout,samplerate=sf.read(wavbuffer)
+wavbuffer.close()
+
+# EBU-R128 Normalization. Use loudnorm algorithm to set loudness to recommended -16 value
+# https://theaudacitytopodcast.com/why-and-how-your-podcast-needs-loudness-normalization-tap307/
+# http://k.ylo.ph/2016/04/04/loudnorm.html
+# Is ffmpeg available?
+try:
+    pipe = Popen(['ffmpeg'], **kwargs)
+    haveffmpeg=True # Yes. Use ffmpeg loudnorm filter
+except:
+    haveffmpeg=False # No. Do nothing
+    print('ffmpeg is not available. loudnorm normalization will not be done')
+
+if haveffmpeg:
+    print('Setting LUFS loudness to recommended value -16')
+    wavbuffer=io.BytesIO()
+    sf.write(wavbuffer,dataout,samplerate,format='wav')
+    # pipe = Popen(['ffmpeg','-i','pipe:0','-f','wav','pipe:1'], **kwargs)
+    pipe = Popen(['ffmpeg','-i','pipe:0','-af','loudnorm=print_format=json','-f','null','pipe:1'], **kwargs)
+    (output,err)=pipe.communicate(input=wavbuffer.getvalue())
+    lines=err.decode().split('\n')
+    for line in lines:
+        if "input_i" in line:
+            measI=(line.split('"')[3])
+        if "input_tp" in line:
+            measTP=(line.split('"')[3])
+        if "input_lra" in line:
+            measLRA=(line.split('"')[3])
+        if "input_thresh" in line:
+            measThres=(line.split('"')[3])
+        if "target_offset" in line:
+            measOffset=(line.split('"')[3])
+    print('   Measured I:{}, TP:{}, LRA:{}, Threshold:{}, Offset:{}'.format(measI,measTP,measLRA,measThres,measOffset))
+    print('Renormalizing')
+    loudnormstr='loudnorm=I=-16:TP=-1.5:LRA=11:measured_I='+measI+':measured_LRA='+measLRA+':measured_TP='+measTP+':measured_thresh='+measThres+':offset='+measOffset+':linear=true:print_format=none'
+#ffmpeg -i in.wav -af loudnorm=I=-16:TP=-1.5:LRA=11:measured_I=-27.61:measured_LRA=18.06:measured_TP=-4.47:measured_thresh=-39.20:offset=0.58:linear=true:print_format=summary -ar 48k out.wav
+    pipe = Popen(['ffmpeg','-i','pipe:0','-af',loudnormstr,'-f','wav','-ar',str(samplerate),'pipe:1'], **kwargs)
     (output,err)=pipe.communicate(input=wavbuffer.getvalue())
     wavbuffer.close()
     wavbuffer=io.BytesIO(output)
     dataout,samplerate=sf.read(wavbuffer)
-wavbuffer.close()
-
+    
+# All finished
 # Write output file
 if outwavdir != '':
     outfile=os.path.join(outwavdir,'compressed.wav')
