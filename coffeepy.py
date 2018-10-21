@@ -399,7 +399,8 @@ config['Config'] = {'Starting dir': startdir,
                     'Temp dir':tmpdir,
                     'Output mp3 dir':outmp3dir ,
                     'Output wav dir':outwavdir ,
-                    'Compress original files (y/n)':compressoriginals}
+                    'Compress original files (y/n)':compressoriginals,
+                    'Logfile':logfilename }
 with open(os.path.join(homedir,'coffeepy.ini'), 'w') as configfile:
     config.write(configfile)
         
