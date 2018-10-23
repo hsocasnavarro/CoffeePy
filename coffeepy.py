@@ -228,7 +228,11 @@ for filename in filenames:
         data, samplerate = sf.read(f)
     printboth(logfile,'ok')
     # Process data
-    data=data/np.max(data)
+    norm=np.max(np.abs(data)) # First rough normalization
+    if norm < 0.1: # But if track is empty, don't touch it
+        norm=1.
+        data[0]=1.
+    data=data/norm
     length=len(data)
     if firstfile: # Store values to make sure all files are consistent
         firstfile=False
@@ -256,13 +260,13 @@ for filename in filenames:
     voice[indvoice]=1
     printboth(logfile,'voice computed')
     # Take a noise sample from this track
-    imin=np.argmin(pk) # Find minimum
-    iminhours=int(imin/samplerate/3600)
-    iminmin=int((imin/samplerate-iminhours*3600)/60)
-    iminsec=int((imin/samplerate-iminhours*3600-iminmin*60))
+    imin=np.argmin(pk[:-1]) # Find minimum, not considering last second (could be incomplete)
+    iminhours=int(imin/3600)
+    iminmin=int((imin-iminhours*3600)/60)
+    iminsec=int((imin-iminhours*3600-iminmin*60))
     printboth(logfile,'  taking noise from silence at {}hours, {}mins, {}seconds'.format(iminhours,iminmin,iminsec))
     noise=data[imin*samplerate:(imin+1)*samplerate]
-
+    
     # Define profile of volume raising and lowering
     lengthprof=int(samplerate/10)
     if lengthprof < 100:
