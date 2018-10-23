@@ -192,22 +192,16 @@ if len(arguments) != 0: # arguments override values in config file
 
 firstfile=True
 for filename in filenames:
-    # Read file
-    printboth(logfile,'reading '+filename)
-    with open(filename,'rb') as f:
-        data, samplerate = sf.read(f)
-    printboth(logfile,'ok')
+    extension=os.path.splitext(filename)[1].lower()
+    if extension != '.wav' and extension != '.mp3' and extension != '.ogg':
+        printboth(logfile, 'Not an audio file. Skpping '+filename)
+        continue
     # Save a compressed copy'
     if compressoriginals == 'y':
-        extension=os.path.splitext(filename)[1].lower()
-        if extension == '.mp3':
-            printboth(logfile,'Sorry, mp3 input is not supported at the time')
-            time.sleep(1000)
-            logfile.close()
-            sys.exit(1)
         if extension == '.mp3' or extension == '.ogg': # just copy it
             filenamesplit=os.path.basename(filename)
             outfilename=os.path.join(outmp3dir,filenamesplit)
+            printboth(logfile,'Files:'+filename+'   '+outfilename)
             if os.path.normcase(os.path.normpath(os.path.realpath(filename))) != \
                os.path.normcase(os.path.normpath(os.path.realpath(outfilename))):           
                 printboth(logfile,'Copying '+outfilename)
@@ -224,6 +218,16 @@ for filename in filenames:
             (output,err)=pipe.communicate(input=wavbuffer.getvalue())
             wavbuffer.close()
 
+    # Read file
+    if extension == '.mp3':
+        printboth(logfile,'Error reading '+filename)
+        printboth(logfile,'Input files in mp3 format not supported. Skipping it')
+        continue
+        
+    printboth(logfile,'reading '+filename)
+    with open(filename,'rb') as f:
+        data, samplerate = sf.read(f)
+    printboth(logfile,'ok')
     # Process data
     data=data/np.max(data)
     length=len(data)
@@ -321,6 +325,11 @@ for filename in filenames:
     data=np.where(data < -.85, -.85+(data+.85)/3,data)
     dataout=dataout+np.clip(data,-1.,1.)
 
+if firstfile: # No valid files have been found
+    printboth(logfile,'No valid files found. Exiting at '+time.strftime("%Y-%m-%d %H:%M:%S"))
+    logfile.close()
+    sys.exit(1)
+    
 if len(filenames) >= 2:
     printboth(logfile,'renormalizing mix')
     # Look for saturations in mixed track
