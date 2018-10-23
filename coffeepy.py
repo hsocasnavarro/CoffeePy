@@ -201,7 +201,6 @@ for filename in filenames:
         if extension == '.mp3' or extension == '.ogg': # just copy it
             filenamesplit=os.path.basename(filename)
             outfilename=os.path.join(outmp3dir,filenamesplit)
-            printboth(logfile,'Files:'+filename+'   '+outfilename)
             if os.path.normcase(os.path.normpath(os.path.realpath(filename))) != \
                os.path.normcase(os.path.normpath(os.path.realpath(outfilename))):           
                 printboth(logfile,'Copying '+outfilename)
@@ -234,6 +233,7 @@ for filename in filenames:
     if firstfile: # Store values to make sure all files are consistent
         firstfile=False
         dataout=np.zeros(length)
+        noiseout=np.zeros(samplerate)
         samplerate0=samplerate
         length0=length
     else:
@@ -255,6 +255,13 @@ for filename in filenames:
     voice=np.zeros(len(pk))
     voice[indvoice]=1
     printboth(logfile,'voice computed')
+    # Take a noise sample from this track
+    imin=np.argmin(pk) # Find minimum
+    iminhours=int(imin/samplerate/3600)
+    iminmin=int((imin/samplerate-iminhours*3600)/60)
+    iminsec=int((imin/samplerate-iminhours*3600-iminmin*60))
+    printboth(logfile,'  taking noise from silence at {}hours, {}mins, {}seconds'.format(iminhours,iminmin,iminsec))
+    noise=data[imin*samplerate:(imin+1)*samplerate]
 
     # Define profile of volume raising and lowering
     lengthprof=int(samplerate/10)
@@ -294,7 +301,7 @@ for filename in filenames:
                 gain[idx1:idx1+lengthprof]=gain[idx1+1]+step*proflower
         i0=i1+1
     printboth(logfile,'gain computed')
-
+    
     # Apply gain
     data=np.multiply(data,gain)
 
@@ -312,7 +319,10 @@ for filename in filenames:
     # Normalize with distortion above 5-sigma
     absdata=np.abs(data)
     absdata=absdata[absdata > 0.1] # consider frames with signal only
-    norm=np.mean(absdata)+np.std(absdata)*5
+    if len(absdata) > 0:
+        norm=np.mean(absdata)+np.std(absdata)*5
+    else:
+        norm=1.
     data=data/norm*.8
     # For Coffee Break only
     # Trick for teleconference track (always sounds louder, for some reason)
@@ -320,15 +330,17 @@ for filename in filenames:
     #    printboth(logfile,'Trick for reducing volume in telecon track')
     #    data=data*.8
     #
+
     # Look for saturations in mixed track
     data=np.where(data > .85, .85+(data-.85)/3,data)
     data=np.where(data < -.85, -.85+(data+.85)/3,data)
     dataout=dataout+np.clip(data,-1.,1.)
+    # Add noise from this track to global noise
+    noiseout=noiseout+noise
 
 if firstfile: # No valid files have been found
     printboth(logfile,'No valid files found. Exiting at '+time.strftime("%Y-%m-%d %H:%M:%S"))
     logfile.close()
-    sys.exit(1)
     
 if len(filenames) >= 2:
     printboth(logfile,'renormalizing mix')
@@ -339,20 +351,11 @@ if len(filenames) >= 2:
     dataout=np.where(dataout < -.85, -.85+(dataout+.85)/3,dataout)
     dataout=np.clip(dataout,-1.,1.)
 #
-
 # de-noise
 # according to https://stackoverflow.com/questions/44159621/how-to-denoise-with-sox
 printboth(logfile,'Noise reduction')
-pk=peaks(data,samplerate) # peaks in 1-second bins
-imin=np.argmin(pk) # Find minimum
-iminhours=int(imin/samplerate/3600)
-iminmin=int((imin/samplerate-iminhours*3600)/60)
-iminsec=int((imin/samplerate-iminhours*3600-iminmin*60))
-printboth(logfile,'  taking noise from silence at {}hours, {}mins, {}seconds'.format(iminhours,iminmin,iminsec))
-noise=dataout[imin*samplerate:(imin+1)*samplerate]
-
 wavbuffer=io.BytesIO()
-sf.write(wavbuffer,noise,samplerate,format='wav')
+sf.write(wavbuffer,noiseout,samplerate,format='wav')
 
 # Use sox to denoise. We pipe BytesIO buffer through sox
 # First, create noise profile noise.prof. Create sox pipe
@@ -362,7 +365,7 @@ pipe.communicate(input=noisebuffer) # Send noise data to sox
 # Now filter the rest using noise.prof. Create sox pipe
 pipe = Popen(['sox','-','-t','wav','-','noisered',os.path.join(tmpdir,'noise.prof'),'0.21'], **kwargs)
 wavbuffer.close()
-wavbuffer=io.BytesIO(output)
+wavbuffer=io.BytesIO()
 sf.write(wavbuffer,dataout,samplerate,format='wav')
 (output,err)=pipe.communicate(input=wavbuffer.getvalue())
 wavbuffer.close()
