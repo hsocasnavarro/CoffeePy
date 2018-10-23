@@ -15,7 +15,13 @@
 # 1) Take one or more input audio files, each file has an audio track
 #    with the recording of each microphone. Input files may be passed
 #    as arguments (non-interactive mode), otherwise a GUI pops up to
-#    interactively select one or more files
+#    interactively select one or more files. Keywords in the config file
+#    (~/coffeepy.ini) may also be passed as arguments with the syntax:
+#    --keyword=value (example: output_mp3_dir=/tmp). In this case
+#    there must be no spaces before or after the = sign and any spaces
+#    in the keyword must be replaced with the _ symbol, as in the example.
+#    If config options are passed as arguments, then it's considered
+#    a temporary behavior and the config file ~/coffeepy.ini is not modified
 #
 # 2) Optionally, generate a compressed copy of the input files for archival
 #    (if "Compress original files" is specified in ~/coffeepy.ini)
@@ -55,7 +61,7 @@
 #    is specified)
 #
 # 8) Update configuration file ~/coffeepy.ini with current values to remember
-#    them next time
+#    them next time, but only if no config options were passed as arguments
 #
 #
 # Requirements
@@ -136,7 +142,7 @@ if len(configfile) > 0:
         logfilename=config['Config'].get('Logfile',logfilename)
         outmp3dir=config['Config'].get('Output mp3 dir',outmp3dir)
         outwavdir=config['Config'].get('Output wav dir',outwavdir)
-        compressoriginals=config['Config'].get('Compress original files (y/n)',compressoriginals)
+        compressoriginals=config['Config'].get('Compress original files',compressoriginals)
         compressoriginals=compressoriginals.lower()
         if compressoriginals != 'y' and compressoriginals != 'n':
             compressoriginals='n'
@@ -149,9 +155,16 @@ logfile=open(logfilename,'w')
 printboth(logfile,'*** Starting coffeepy at '+time.strftime("%Y-%m-%d %H:%M:%S")+'********')
 
 # Filenames from arguments or pick them up via GUI?
+filenames=[]
+arguments=[]
 if len(sys.argv) > 1:
-    filenames=sys.argv[1:]
-else:        
+    for arg in sys.argv[1:]:
+        if arg[0:2] == '--':
+            arguments.append(arg)
+        else:
+            filenames.append(arg)
+
+if len(filenames) == 0:
 # GUI
     root = tk.Tk()
     root.withdraw()
@@ -161,6 +174,21 @@ if len(filenames) == 0:
     printboth(logfile,'Exiting')
     logfile.close()
     sys.exit(0)
+
+if len(arguments) != 0: # arguments override values in config file
+    for arg in arguments:
+        if 'staring_dir' in arg.lower():
+            startdir=arg.split('=')[1]
+        if 'temp_dir' in arg.lower():
+            tmpdir=arg.split('=')[1]
+        if 'logfile' in arg.lower():
+            logfilename=arg.split('=')[1]
+        if 'output_mp3_dir' in arg.lower():
+            outmp3dir=arg.split('=')[1]
+        if 'output_wav_dir' in arg.lower():
+            outwavdir=arg.split('=')[1]
+        if 'compress_original_files' in arg.lower():
+            compressoriginals=arg.split('=')[1]
 
 firstfile=True
 for filename in filenames:
@@ -393,16 +421,18 @@ if outmp3dir != '':
     (output,err)=pipe.communicate(input=wavbuffer.getvalue())
     wavbuffer.close()
 
-# Write config file with current settings
-startdir=os.path.dirname(filename)
-config['Config'] = {'Starting dir': startdir,
-                    'Temp dir':tmpdir,
-                    'Output mp3 dir':outmp3dir ,
-                    'Output wav dir':outwavdir ,
-                    'Compress original files (y/n)':compressoriginals,
-                    'Logfile':logfilename }
-with open(os.path.join(homedir,'coffeepy.ini'), 'w') as configfile:
-    config.write(configfile)
+# Write config file with current settings, but only if no arguments
+# have been used
+if len(arguments) == 0:
+    startdir=os.path.dirname(filename)
+    config['Config'] = {'Starting dir': startdir,
+                        'Temp dir':tmpdir,
+                        'Output mp3 dir':outmp3dir ,
+                        'Output wav dir':outwavdir ,
+                        'Compress original files':compressoriginals,
+                        'Logfile':logfilename }
+    with open(os.path.join(homedir,'coffeepy.ini'), 'w') as configfile:
+        config.write(configfile)
         
 # Print errors
 if len(errors) > 0:
