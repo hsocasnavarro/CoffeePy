@@ -227,17 +227,10 @@ for filename in filenames:
     with open(filename,'rb') as f:
         data, samplerate = sf.read(f)
     printboth(logfile,'ok')
-    # Process data
-    norm=np.max(np.abs(data)) # First rough normalization
-    if norm < 0.1: # But if track is empty, don't touch it
-        norm=1.
-        data[0]=1.
-    data=data/norm
     length=len(data)
     if firstfile: # Store values to make sure all files are consistent
         firstfile=False
         dataout=np.zeros(length)
-        noiseout=np.zeros(samplerate)
         samplerate0=samplerate
         length0=length
     else:
@@ -250,6 +243,13 @@ for filename in filenames:
             logfile.close()
             sys.exit(1)
 
+    # Process data
+    norm=np.max(np.abs(data)) # First rough normalization
+    if norm < 0.1: # But if track is empty, don't touch it
+        norm=1.
+        printboth(logfile, 'This track contains no meaningful audio. Skpping '+filename)
+        continue # Next file
+    data=data/norm
     # Take 1-second bins to find peaks, determine if voice or silence
     pk=peaks(data,samplerate) # peaks in 1-second bins
     printboth(logfile,'peaks found')
@@ -259,6 +259,7 @@ for filename in filenames:
     voice=np.zeros(len(pk))
     voice[indvoice]=1
     printboth(logfile,'voice computed')
+    
     # Take a noise sample from this track
     imin=np.argmin(pk[:-1]) # Find minimum, not considering last second (could be incomplete)
     iminhours=int(imin/3600)
@@ -266,6 +267,27 @@ for filename in filenames:
     iminsec=int((imin-iminhours*3600-iminmin*60))
     printboth(logfile,'  taking noise from silence at {}hours, {}mins, {}seconds'.format(iminhours,iminmin,iminsec))
     noise=data[imin*samplerate:(imin+1)*samplerate]
+    # de-noise
+    # according to https://stackoverflow.com/questions/44159621/how-to-denoise-with-sox
+    printboth(logfile,'Noise reduction')
+    wavbuffer=io.BytesIO()
+    sf.write(wavbuffer,noise,samplerate,format='wav')
+    # Use sox to denoise. We pipe BytesIO buffer through sox
+    # First, create noise profile noise.prof. Create sox pipe
+    pipe = Popen(['sox','-','-n','noiseprof',os.path.join(tmpdir,'noise.prof')], **kwargs)
+    noisebuffer=wavbuffer.getvalue()
+    pipe.communicate(input=noisebuffer) # Send noise data to sox
+    # Now filter the rest using noise.prof. Create sox pipe
+    pipe = Popen(['sox','-','-t','wav','-','noisered',os.path.join(tmpdir,'noise.prof'),'0.11'], **kwargs)
+    wavbuffer.close()
+    wavbuffer=io.BytesIO()
+    sf.write(wavbuffer,data,samplerate,format='wav')
+    (output,err)=pipe.communicate(input=wavbuffer.getvalue())
+    wavbuffer.close()
+    wavbuffer=io.BytesIO(output)
+    data,samplerate=sf.read(wavbuffer)
+    wavbuffer.close()
+    data.resize((length)) # sox might cut some values at the end. Force original length
     
     # Define profile of volume raising and lowering
     lengthprof=int(samplerate/10)
@@ -339,8 +361,6 @@ for filename in filenames:
     data=np.where(data > .85, .85+(data-.85)/3,data)
     data=np.where(data < -.85, -.85+(data+.85)/3,data)
     dataout=dataout+np.clip(data,-1.,1.)
-    # Add noise from this track to global noise
-    noiseout=noiseout+noise
 
 if firstfile: # No valid files have been found
     printboth(logfile,'No valid files found. Exiting at '+time.strftime("%Y-%m-%d %H:%M:%S"))
@@ -355,28 +375,6 @@ if len(filenames) >= 2:
     dataout=np.where(dataout < -.85, -.85+(dataout+.85)/3,dataout)
     dataout=np.clip(dataout,-1.,1.)
 #
-# de-noise
-# according to https://stackoverflow.com/questions/44159621/how-to-denoise-with-sox
-printboth(logfile,'Noise reduction')
-wavbuffer=io.BytesIO()
-sf.write(wavbuffer,noiseout,samplerate,format='wav')
-
-# Use sox to denoise. We pipe BytesIO buffer through sox
-# First, create noise profile noise.prof. Create sox pipe
-pipe = Popen(['sox','-','-n','noiseprof',os.path.join(tmpdir,'noise.prof')], **kwargs)
-noisebuffer=wavbuffer.getvalue()
-pipe.communicate(input=noisebuffer) # Send noise data to sox
-# Now filter the rest using noise.prof. Create sox pipe
-pipe = Popen(['sox','-','-t','wav','-','noisered',os.path.join(tmpdir,'noise.prof'),'0.21'], **kwargs)
-wavbuffer.close()
-wavbuffer=io.BytesIO()
-sf.write(wavbuffer,dataout,samplerate,format='wav')
-(output,err)=pipe.communicate(input=wavbuffer.getvalue())
-wavbuffer.close()
-wavbuffer=io.BytesIO(output)
-dataout,samplerate=sf.read(wavbuffer)
-wavbuffer.close()
-
 # EBU-R128 Normalization. Use loudnorm algorithm to set loudness to recommended -16 value
 # https://theaudacitytopodcast.com/why-and-how-your-podcast-needs-loudness-normalization-tap307/
 # http://k.ylo.ph/2016/04/04/loudnorm.html
