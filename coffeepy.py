@@ -192,6 +192,7 @@ if len(arguments) != 0: # arguments override values in config file
 
 firstfile=True
 for filename in filenames:
+    data=[]
     extension=os.path.splitext(filename)[1].lower()
     if extension != '.wav' and extension != '.mp3' and extension != '.ogg':
         printboth(logfile, 'Not an audio file. Skpping '+filename)
@@ -206,6 +207,10 @@ for filename in filenames:
                 printboth(logfile,'Copying '+outfilename)
                 shutil.copyfile(filename,outfilename)
         else: # Compress
+            printboth(logfile,'reading '+filename)
+            with open(filename,'rb') as f:
+                data, samplerate = sf.read(f)
+            printboth(logfile,'ok')
             outfile=os.path.basename(filename)
             outfile=os.path.splitext(outfile)[0]+'.mp3'
             outfile=os.path.join(outmp3dir,outfile)
@@ -222,11 +227,12 @@ for filename in filenames:
         printboth(logfile,'Error reading '+filename)
         printboth(logfile,'Input files in mp3 format not supported. Skipping it')
         continue
-        
-    printboth(logfile,'reading '+filename)
-    with open(filename,'rb') as f:
-        data, samplerate = sf.read(f)
-    printboth(logfile,'ok')
+
+    if len(data) == 0:
+        printboth(logfile,'reading '+filename)
+        with open(filename,'rb') as f:
+            data, samplerate = sf.read(f)
+        printboth(logfile,'ok')
     length=len(data)
     if firstfile: # Store values to make sure all files are consistent
         firstfile=False
@@ -261,7 +267,9 @@ for filename in filenames:
     printboth(logfile,'voice computed')
     
     # Take a noise sample from this track
-    imin=np.argmin(pk[:-1]) # Find minimum, not considering last second (could be incomplete)
+    pk2=np.copy(pk)
+    pk2=np.where(pk < 1e-4, 2., pk) # replace zeros with 2 to ignore them in minimum search
+    imin=np.argmin(pk2[:-1]) # Find minimum, not considering last second (could be incomplete)
     iminhours=int(imin/3600)
     iminmin=int((imin-iminhours*3600)/60)
     iminsec=int((imin-iminhours*3600-iminmin*60))
@@ -269,25 +277,29 @@ for filename in filenames:
     noise=data[imin*samplerate:(imin+1)*samplerate]
     # de-noise
     # according to https://stackoverflow.com/questions/44159621/how-to-denoise-with-sox
-    printboth(logfile,'Noise reduction')
-    wavbuffer=io.BytesIO()
-    sf.write(wavbuffer,noise,samplerate,format='wav')
-    # Use sox to denoise. We pipe BytesIO buffer through sox
-    # First, create noise profile noise.prof. Create sox pipe
-    pipe = Popen(['sox','-','-n','noiseprof',os.path.join(tmpdir,'noise.prof')], **kwargs)
-    noisebuffer=wavbuffer.getvalue()
-    pipe.communicate(input=noisebuffer) # Send noise data to sox
-    # Now filter the rest using noise.prof. Create sox pipe
-    pipe = Popen(['sox','-','-t','wav','-','noisered',os.path.join(tmpdir,'noise.prof'),'0.11'], **kwargs)
-    wavbuffer.close()
-    wavbuffer=io.BytesIO()
-    sf.write(wavbuffer,data,samplerate,format='wav')
-    (output,err)=pipe.communicate(input=wavbuffer.getvalue())
-    wavbuffer.close()
-    wavbuffer=io.BytesIO(output)
-    data,samplerate=sf.read(wavbuffer)
-    wavbuffer.close()
-    data.resize((length)) # sox might cut some values at the end. Force original length
+    if np.max(noise) > 0.03 or np.max(noise) < 1e-6:
+        printboth(logfile,'Something seems wrong with noise profile here. Maximum value is:',np.max(noise))
+        printboth(logfile,'You should check it by hand. Skipping noise reduction')
+    else:
+        printboth(logfile,'Noise reduction')
+        wavbuffer=io.BytesIO()
+        sf.write(wavbuffer,noise,samplerate,format='wav')
+        # Use sox to denoise. We pipe BytesIO buffer through sox
+        # First, create noise profile noise.prof. Create sox pipe
+        pipe = Popen(['sox','-','-n','noiseprof',os.path.join(tmpdir,'noise.prof')], **kwargs)
+        noisebuffer=wavbuffer.getvalue()
+        pipe.communicate(input=noisebuffer) # Send noise data to sox
+        # Now filter the rest using noise.prof. Create sox pipe
+        pipe = Popen(['sox','-','-t','wav','-','noisered',os.path.join(tmpdir,'noise.prof'),'0.11'], **kwargs)
+        wavbuffer.close()
+        wavbuffer=io.BytesIO()
+        sf.write(wavbuffer,data,samplerate,format='wav')
+        (output,err)=pipe.communicate(input=wavbuffer.getvalue())
+        wavbuffer.close()
+        wavbuffer=io.BytesIO(output)
+        data,samplerate=sf.read(wavbuffer)
+        wavbuffer.close()
+        data.resize((length)) # sox might cut some values at the end. Force original length
     
     # Define profile of volume raising and lowering
     lengthprof=int(samplerate/10)
