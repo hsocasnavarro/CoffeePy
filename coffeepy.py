@@ -72,7 +72,7 @@
 #
 # 2) Should be as fast as possible
 #
-##
+#
 #
 
 import numpy as np
@@ -163,7 +163,14 @@ if len(sys.argv) > 1:
             arguments.append(arg)
         else:
             filenames.append(arg)
-
+debug=False
+if '--debug' in sys.argv:
+    debug=True
+useffmpeg=True
+if '--noffmpeg' in sys.argv:
+    printboth(logfile,'Will skip ffmpeg step')
+    useffmpeg=False
+    
 if len(filenames) == 0:
 # GUI
     root = tk.Tk()
@@ -251,7 +258,7 @@ for filename in filenames:
 
     # Process data
     norm=np.max(np.abs(data)) # First rough normalization
-    if norm < 0.1: # But if track is empty, don't touch it
+    if norm < 0.03: # But if track is empty, don't touch it
         norm=1.
         printboth(logfile, 'This track contains no meaningful audio. Skpping '+filename)
         continue # Next file
@@ -275,9 +282,11 @@ for filename in filenames:
     iminsec=int((imin-iminhours*3600-iminmin*60))
     printboth(logfile,'  taking noise from silence at {}hours, {}mins, {}seconds'.format(iminhours,iminmin,iminsec))
     noise=data[imin*samplerate:(imin+1)*samplerate]
+    noiselev=np.std(noise)
+
     # de-noise
     # according to https://stackoverflow.com/questions/44159621/how-to-denoise-with-sox
-    if np.max(noise) > 0.03 or np.max(noise) < 1e-6:
+    if True or np.max(noise) > 0.03 or np.max(noise) < 1e-6:
         printboth(logfile,'Something seems wrong with noise profile here. Maximum value is:',np.max(noise))
         printboth(logfile,'You should check it by hand. Skipping noise reduction')
     else:
@@ -290,7 +299,8 @@ for filename in filenames:
         noisebuffer=wavbuffer.getvalue()
         pipe.communicate(input=noisebuffer) # Send noise data to sox
         # Now filter the rest using noise.prof. Create sox pipe
-        pipe = Popen(['sox','-','-t','wav','-','noisered',os.path.join(tmpdir,'noise.prof'),'0.11'], **kwargs)
+        pipe = Popen(['sox','-','-t','wav','-','noisered',os.path.join(tmpdir,'noise.prof'),'0.0001'], **kwargs)
+        sys.exit(2)
         wavbuffer.close()
         wavbuffer=io.BytesIO()
         sf.write(wavbuffer,data,samplerate,format='wav')
@@ -346,13 +356,13 @@ for filename in filenames:
     # Silence bins with no signal or pops (pops are noises shorter than 0.1sec)
     printboth(logfile,'muting silence and removing pops')
     absdata=np.abs(data)
-    imin=np.argmin(pk) # bin with minimum signal. Assume this is noise
-    noiselev=np.std(absdata[imin*samplerate:(imin+1)*samplerate])
-    for i0 in range(length2):
+    for i0 in np.arange(1,length2-1):
         bin=absdata[i0*samplerate:(i0+1)*samplerate]
-        if np.sum(bin > 5*noiselev)/samplerate < 0.1: # if no signal longer
-            data[i0*samplerate:(i0+1)*samplerate]=0.
-    
+        binprev=absdata[(i0-1)*samplerate:i0*samplerate]
+        binfolw=absdata[i0*samplerate:(i0+1)*samplerate]
+        if np.sum(bin > .1*voicethreshold)/samplerate < 0.1: # if no signal longer than 0.1s
+            if np.sum([binprev > .1*voicethreshold, binfolw > .1*voicethreshold])/samplerate < 0.1: # and same in previous and following bin
+                data[i0*samplerate:(i0+1)*samplerate]=0.
     printboth(logfile,'renormalizing track')
     # Normalize with distortion above 5-sigma
     absdata=np.abs(data)
@@ -364,15 +374,22 @@ for filename in filenames:
     data=data/norm*.8
     # For Coffee Break only
     # Trick for teleconference track (always sounds louder, for some reason)
-    #if '_L.' in filename:
-    #    printboth(logfile,'Trick for reducing volume in telecon track')
-    #    data=data*.8
+    if '_L.' in filename:
+        printboth(logfile,'Trick for reducing volume in telecon track')
+        data=data*.7
     #
 
     # Look for saturations in mixed track
     data=np.where(data > .85, .85+(data-.85)/3,data)
     data=np.where(data < -.85, -.85+(data+.85)/3,data)
     dataout=dataout+np.clip(data,-1.,1.)
+
+    # if debug, write out wav file with this track after processing
+    if debug:
+        debugfile=os.path.splitext(os.path.basename(filename))[0]
+        debugfile=os.path.join(outmp3dir,debugfile+'_debug.wav')
+        printboth(logfile,'writing debug file:',debugfile)
+        sf.write(debugfile,data,samplerate,format='wav')
 
 if firstfile: # No valid files have been found
     printboth(logfile,'No valid files found. Exiting at '+time.strftime("%Y-%m-%d %H:%M:%S"))
@@ -398,7 +415,7 @@ except:
     haveffmpeg=False # No. Do nothing
     printboth(logfile,'ffmpeg is not available. loudnorm normalization will not be done')
 
-if haveffmpeg:
+if haveffmpeg and useffmpeg:
     printboth(logfile,'Setting LUFS loudness to recommended value -16')
     wavbuffer=io.BytesIO()
     sf.write(wavbuffer,dataout,samplerate,format='wav')
