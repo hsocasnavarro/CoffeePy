@@ -7,7 +7,14 @@
 # multi-track recording of conversations), track mixing and de-noising.
 #
 # Dependencies (modules available with pip): numpy, soundfile
-# External programs required (must be in path): sox, lame
+# External programs required (must be in path): lame
+# External programs optional: rnnoise libraries
+#    Obtain and build rnnoise library from https://github.com/xiph/rnnoise
+#    Build it and copy librnnoise.so from the .libs/ directory
+#    Then compile the included rnnoise2.c with something like
+#    gcc -shared -fpic rnnoise2.c librnnoise.so -I $PATH_TO_RNNOISE/include/ -lm -o librnnoise2.so
+#    Both librnnoise.so and librnnoise2.so must be in the same path as
+#    the Python source of coffepy.py
 #
 #
 # The code must fulfill the following tasks:
@@ -49,7 +56,7 @@
 #    following formula: yc=0.8+(y-0.8)/10
 #    and those eexceeding 0.85 according to: yc=0.85+(y-0.85)/3
 #
-# 6) Apply noise reduction to the mixed track using the sox algorithm
+# 6) Apply noise reduction to the mixed track 
 #
 # 7) Optional: If ffmpeg is available in the system, use its loudnorm
 #    filter to perform normalization according to EBU-R128 standard. Set
@@ -117,6 +124,14 @@ errors=[]
 # To use with pipes (for sox and lame)
 kwargs = {'stdin': PIPE, 'stdout': PIPE, 'stderr': PIPE}
 
+# is rnnoise available?
+try:
+    import rnnoise2
+    rnnoise=rnnoise2.RNNoise()
+    have_rnnoise=True
+except:
+    have_rnnoise=False
+
 # Set directories and read configuration file
 import configparser
 from pathlib import Path
@@ -134,6 +149,7 @@ config=configparser.ConfigParser()
 configfile=config.read(os.path.join(homedir,'coffeepy.ini'))
 logfilename=os.path.join(tmpdir,'coffeepy.log')
 startdir=rootdir
+vocaltrackpattern='_Tr'
 
 if len(configfile) > 0:
     try:
@@ -147,6 +163,7 @@ if len(configfile) > 0:
         if compressoriginals != 'y' and compressoriginals != 'n':
             compressoriginals='n'
             errors.append("Unrecognized option in ini file for 'Compress original files'. Assuming 'n'")
+        vocaltrackpattern=config['Config'].get('Vocal track pattern',vocaltrackpattern)
     except:
         print('Error in config file. Attempting to read file:'+os.path.join(homedir,'coffeepy.ini'))        
 
@@ -273,44 +290,6 @@ for filename in filenames:
     voice[indvoice]=1
     printboth(logfile,'voice computed')
     
-    # Take a noise sample from this track
-    pk2=np.copy(pk)
-    pk2=np.where(pk < 1e-4, 2., pk) # replace zeros with 2 to ignore them in minimum search
-    imin=np.argmin(pk2[:-1]) # Find minimum, not considering last second (could be incomplete)
-    iminhours=int(imin/3600)
-    iminmin=int((imin-iminhours*3600)/60)
-    iminsec=int((imin-iminhours*3600-iminmin*60))
-    printboth(logfile,'  taking noise from silence at {}hours, {}mins, {}seconds'.format(iminhours,iminmin,iminsec))
-    noise=data[imin*samplerate:(imin+1)*samplerate]
-    noiselev=np.std(noise)
-
-    # de-noise
-    # according to https://stackoverflow.com/questions/44159621/how-to-denoise-with-sox
-    if True or np.max(noise) > 0.03 or np.max(noise) < 1e-6:
-        printboth(logfile,'Something seems wrong with noise profile here. Maximum value is:',np.max(noise))
-        printboth(logfile,'You should check it by hand. Skipping noise reduction')
-    else:
-        printboth(logfile,'Noise reduction')
-        wavbuffer=io.BytesIO()
-        sf.write(wavbuffer,noise,samplerate,format='wav')
-        # Use sox to denoise. We pipe BytesIO buffer through sox
-        # First, create noise profile noise.prof. Create sox pipe
-        pipe = Popen(['sox','-','-n','noiseprof',os.path.join(tmpdir,'noise.prof')], **kwargs)
-        noisebuffer=wavbuffer.getvalue()
-        pipe.communicate(input=noisebuffer) # Send noise data to sox
-        # Now filter the rest using noise.prof. Create sox pipe
-        pipe = Popen(['sox','-','-t','wav','-','noisered',os.path.join(tmpdir,'noise.prof'),'0.0001'], **kwargs)
-        sys.exit(2)
-        wavbuffer.close()
-        wavbuffer=io.BytesIO()
-        sf.write(wavbuffer,data,samplerate,format='wav')
-        (output,err)=pipe.communicate(input=wavbuffer.getvalue())
-        wavbuffer.close()
-        wavbuffer=io.BytesIO(output)
-        data,samplerate=sf.read(wavbuffer)
-        wavbuffer.close()
-        data.resize((length)) # sox might cut some values at the end. Force original length
-    
     # Define profile of volume raising and lowering
     lengthprof=int(samplerate/10)
     if lengthprof < 100:
@@ -383,6 +362,19 @@ for filename in filenames:
     data=np.where(data > .85, .85+(data-.85)/3,data)
     data=np.where(data < -.85, -.85+(data+.85)/3,data)
     dataout=dataout+np.clip(data,-1.,1.)
+    
+    # de-noise
+    if have_rnnoise:
+        if vocaltrackpattern in filename:
+            printboth(logfile,'Noise reduction')
+            data=data*.8 # rnnoise fails where data reaches 1
+            rnnoise.process_audio(data)
+            data=data/.8
+            printboth(logfile,'     done')
+        else:
+            printboth(logfile,'Not a vocal track. Skipping noise reduction here')
+    else: # rnnoise not available
+        printboth(logfile,'rnnoise is not available. Skipping noise reduction')
 
     # if debug, write out wav file with this track after processing
     if debug:
@@ -403,6 +395,7 @@ if len(filenames) >= 2:
     dataout=np.where(dataout > .85, .85+(dataout-.85)/3,dataout)
     dataout=np.where(dataout < -.85, -.85+(dataout+.85)/3,dataout)
     dataout=np.clip(dataout,-1.,1.)
+    
 #
 # EBU-R128 Normalization. Use loudnorm algorithm to set loudness to recommended -16 value
 # https://theaudacitytopodcast.com/why-and-how-your-podcast-needs-loudness-normalization-tap307/
